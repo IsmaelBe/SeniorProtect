@@ -15,9 +15,35 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./senior_shield.db")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+if DATABASE_URL.startswith("sqlite"):
+    engine = create_engine(
+        DATABASE_URL,
+        connect_args={"check_same_thread": False},
+        pool_pre_ping=True,
+    )
+else:
+    # Le pooler Supabase (Supavisor) rejette parfois une connexion par intermittence
+    # ("password authentication failed" transitoire). On réessaie à chaque ouverture
+    # de connexion pour ne pas faire échouer la requête / le boot.
+    import time
 
-engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
+    import psycopg2  # type: ignore
+
+    def _connect_with_retry(retries: int = 4, delay: float = 1.5):
+        last_exc = None
+        for _ in range(retries):
+            try:
+                return psycopg2.connect(DATABASE_URL)
+            except psycopg2.OperationalError as exc:
+                last_exc = exc
+                time.sleep(delay)
+        raise last_exc
+
+    engine = create_engine(
+        DATABASE_URL,
+        creator=_connect_with_retry,
+        pool_pre_ping=True,
+    )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 

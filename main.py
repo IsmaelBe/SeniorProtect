@@ -22,6 +22,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 import gmail_client
+import mailer
 import phishing
 from database import Base, engine, get_db
 from models import Email, User
@@ -45,7 +46,24 @@ BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 # URL du front Lovable (redirection après connexion Gmail réussie).
 FRONT_URL = os.getenv("FRONT_URL", BASE_URL)
 
-Base.metadata.create_all(bind=engine)
+def _init_db(retries: int = 5, delay: float = 3.0):
+    """Crée les tables au démarrage. Le pooler Supabase rejette parfois la 1re
+    connexion (hoquet transitoire) : on réessaie au lieu de planter le boot.
+    """
+    import time
+
+    for attempt in range(1, retries + 1):
+        try:
+            Base.metadata.create_all(bind=engine)
+            return
+        except Exception as exc:
+            if attempt == retries:
+                raise
+            print(f"[init_db] tentative {attempt}/{retries} échouée ({exc}); retry…")
+            time.sleep(delay)
+
+
+_init_db()
 
 app = FastAPI(title="Senior Shield API", version="1.0.0")
 
@@ -232,7 +250,18 @@ def send_phishing(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Génère un faux mail de phishing et le dépose dans la boîte de l'utilisateur."""
+    """Génère un faux mail de phishing et l'ENVOIE par email au senior à piéger.
+
+    Le destinataire est `guardian_email` (l'adresse du senior renseignée à l'inscription).
+    Si le senior clique le lien piège, ça remonte en alerte dans /audit.
+    """
+    # L'adresse du senior à piéger est obligatoire pour envoyer le test.
+    if not user.guardian_email:
+        raise HTTPException(
+            status_code=400,
+            detail="Aucune adresse de senior à piéger (guardian_email manquant).",
+        )
+
     sent_count = (
         db.query(Email)
         .filter(Email.user_id == user.id, Email.is_phishing.is_(True))
@@ -254,19 +283,7 @@ def send_phishing(
     trap_link = f'<a href="{BASE_URL}/track/click/{token}">Cliquez ici</a>'
     body = generated["body"].replace("{{LINK}}", trap_link)
 
-    # En mode connecté, on dépose le mail dans la VRAIE boîte Gmail (sans l'envoyer).
-    gmail_id = None
-    if user.gmail_connected:
-        gmail_id = gmail_client.insert_phishing(
-            user,
-            db,
-            generated["sender_name"],
-            generated["sender_email"],
-            generated["subject"],
-            body,
-        )
-
-    # On garde une trace en base (pour l'audit et le suivi des clics), dans les 2 modes.
+    # On garde une trace en base (pour l'audit et le suivi des clics).
     email = Email(
         user_id=user.id,
         sender_name=generated["sender_name"],
@@ -275,18 +292,35 @@ def send_phishing(
         body=body,
         is_phishing=True,
         link_token=token,
-        gmail_message_id=gmail_id,
     )
     db.add(email)
     db.commit()
     db.refresh(email)
 
+    # Envoi du VRAI email au senior. Si l'envoi échoue, on annule la trace en base
+    # pour ne pas fausser le compteur de tests / l'audit.
+    try:
+        mailer.send_email(
+            to_email=user.guardian_email,
+            subject=generated["subject"],
+            html_body=body,
+            sender_name=generated["sender_name"],
+        )
+    except Exception as exc:
+        db.delete(email)
+        db.commit()
+        raise HTTPException(
+            status_code=502,
+            detail=f"Échec de l'envoi de l'email : {exc}",
+        )
+
     return {
         "id": email.id,
         "subject": email.subject,
+        "sent_to": user.guardian_email,
         "tests_used": sent_count + 1,
         "free_limit": FREE_PHISHING_LIMIT,
-        "message": "Test de phishing déposé dans la boîte.",
+        "message": f"Test de phishing envoyé à {user.guardian_email}.",
     }
 
 
