@@ -1,42 +1,59 @@
-"""Envoi d'emails réels via SMTP (Gmail).
+"""Envoi d'emails via l'API HTTP de Mailjet.
 
-On envoie le faux mail de phishing à l'adresse du senior à piéger (guardian_email).
-Identifiants attendus dans l'environnement :
-- SMTP_EMAIL    : l'adresse Gmail qui envoie (ex. moncompte@gmail.com)
-- SMTP_PASSWORD : un "mot de passe d'application" Google (16 caractères, PAS le mot de
-                  passe habituel). Voir https://myaccount.google.com/apppasswords
+Render (plan gratuit) bloque les ports SMTP sortants : on passe donc par l'API
+HTTPS de Mailjet (port 443) au lieu de smtplib.
+
+Variables d'environnement attendues :
+- MAILJET_API_KEY      : clé API publique (Mailjet → Account → API Key Management)
+- MAILJET_SECRET_KEY   : clé secrète
+- MAILJET_SENDER_EMAIL : adresse expéditrice VALIDÉE dans Mailjet (Senders)
+- MAILJET_SENDER_NAME  : nom d'affichage par défaut (optionnel)
 """
 import os
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_EMAIL = os.getenv("SMTP_EMAIL", "")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+import requests  # type: ignore
+
+MAILJET_API_KEY = os.getenv("MAILJET_API_KEY", "")
+MAILJET_SECRET_KEY = os.getenv("MAILJET_SECRET_KEY", "")
+MAILJET_SENDER_EMAIL = os.getenv("MAILJET_SENDER_EMAIL", "")
+MAILJET_SENDER_NAME = os.getenv("MAILJET_SENDER_NAME", "Senior Shield")
+MAILJET_URL = "https://api.mailjet.com/v3.1/send"
 
 
 def is_configured() -> bool:
-    return bool(SMTP_EMAIL and SMTP_PASSWORD)
+    return bool(MAILJET_API_KEY and MAILJET_SECRET_KEY and MAILJET_SENDER_EMAIL)
 
 
 def send_email(to_email: str, subject: str, html_body: str, sender_name: str = None) -> None:
-    """Envoie un email HTML. Lève une exception si l'envoi échoue."""
+    """Envoie un email HTML via Mailjet. Lève une exception si l'envoi échoue.
+
+    `sender_name` = nom d'affichage usurpé (ex. "Sécurité Banque Postale"). L'adresse
+    expéditrice reste MAILJET_SENDER_EMAIL (la seule validée).
+    """
     if not is_configured():
         raise RuntimeError(
-            "SMTP non configuré : renseigne SMTP_EMAIL et SMTP_PASSWORD."
+            "Mailjet non configuré : renseigne MAILJET_API_KEY, MAILJET_SECRET_KEY "
+            "et MAILJET_SENDER_EMAIL."
         )
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    # Gmail impose l'adresse d'envoi = le compte authentifié ; on ne garde que le nom
-    # d'affichage de l'expéditeur usurpé (l'adresse reste la nôtre).
-    msg["From"] = f"{sender_name} <{SMTP_EMAIL}>" if sender_name else SMTP_EMAIL
-    msg["To"] = to_email
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
-
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-        server.starttls()
-        server.login(SMTP_EMAIL, SMTP_PASSWORD)
-        server.sendmail(SMTP_EMAIL, [to_email], msg.as_string())
+    payload = {
+        "Messages": [
+            {
+                "From": {
+                    "Email": MAILJET_SENDER_EMAIL,
+                    "Name": sender_name or MAILJET_SENDER_NAME,
+                },
+                "To": [{"Email": to_email}],
+                "Subject": subject,
+                "HTMLPart": html_body,
+            }
+        ]
+    }
+    resp = requests.post(
+        MAILJET_URL,
+        json=payload,
+        auth=(MAILJET_API_KEY, MAILJET_SECRET_KEY),
+        timeout=15,
+    )
+    if resp.status_code >= 300:
+        raise RuntimeError(f"Mailjet a refusé l'envoi ({resp.status_code}) : {resp.text}")
