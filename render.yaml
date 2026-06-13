@@ -1,19 +1,15 @@
-databases:
-  - name: senior-shield-db
-    plan: free
-
 services:
   - type: web
     name: senior-shield-api
     runtime: python
-    rootDir: senior_shield
+    # Le code est à la RACINE du repo (pas de sous-dossier) -> pas de rootDir.
     buildCommand: pip install -r requirements.txt
+    # L'app est dans main.py -> module "main" (surtout PAS "api").
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
+      # Base Postgres déjà créée à la main -> à coller dans le dashboard Render.
       - key: DATABASE_URL
-        fromDatabase:
-          name: senior-shield-db
-          property: connectionString
+        sync: false        # ex postgresql://user:pwd@host/dbname
       - key: SECRET_KEY
         generateValue: true
       - key: BASE_URL

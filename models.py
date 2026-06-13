@@ -1,8 +1,8 @@
 """Tables de la base de données."""
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
-from sqlalchemy.orm import relationship
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text # type: ignore
+from sqlalchemy.orm import relationship # type: ignore
 
 from database import Base
 
