@@ -22,27 +22,36 @@ if DATABASE_URL.startswith("sqlite"):
         pool_pre_ping=True,
     )
 else:
-    # Le pooler Supabase (Supavisor) rejette parfois une connexion par intermittence
-    # ("password authentication failed" transitoire). On réessaie à chaque ouverture
-    # de connexion pour ne pas faire échouer la requête / le boot.
+    # Le pooler Supabase (Supavisor) peut rejeter une connexion par intermittence.
+    # On réessaie UN PEU pour absorber un hoquet transitoire — MAIS si le disjoncteur
+    # est ouvert (ECIRCUITBREAKER), on échoue tout de suite : marteler entretient le
+    # disjoncteur et l'empêche de se réarmer.
     import time
 
     import psycopg2  # type: ignore
 
-    def _connect_with_retry(retries: int = 4, delay: float = 1.5):
+    def _connect_with_retry(retries: int = 2, delay: float = 2.0):
         last_exc = None
         for _ in range(retries):
             try:
                 return psycopg2.connect(DATABASE_URL)
             except psycopg2.OperationalError as exc:
                 last_exc = exc
+                if "ECIRCUITBREAKER" in str(exc):
+                    raise  # ne pas marteler le disjoncteur
                 time.sleep(delay)
         raise last_exc
 
+    # pool_size + recycle : on garde des connexions chaudes et réutilisées au lieu
+    # d'en rouvrir une à chaque requête (réduit fortement le nombre d'auth → moins
+    # de risque de déclencher le disjoncteur).
     engine = create_engine(
         DATABASE_URL,
         creator=_connect_with_retry,
         pool_pre_ping=True,
+        pool_size=3,
+        max_overflow=2,
+        pool_recycle=1800,
     )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
