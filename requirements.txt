@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+bcrypt
+pyjwt
+google-api-python-client
+google-auth
+google-auth-oauthlib
+python-dotenv
+email-validator
